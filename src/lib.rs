@@ -1,239 +1,58 @@
-pub mod afterlife;
-pub mod graveyard;
-pub mod memorial;
-pub mod necropolis;
-pub mod tombstone;
+#![allow(dead_code)]
+#[derive(Clone,Debug,PartialEq)]
+pub enum ArtKind { Function, Module, Test, Config, Documentation, Data, Skill }
+pub struct Artifact { id: u32, name: String, kind: ArtKind, born: u32, died: u32, usefulness: f64, harvested: bool }
+pub struct Necropolis { artifacts: Vec<Artifact>, catalog: Vec<Artifact>, next_id: u32, tick: u32 }
 
-pub use afterlife::{Afterlife, KnowledgeFragment};
-pub use graveyard::Graveyard;
-pub use memorial::{MemorialLog, MemorialVisit};
-pub use necropolis::{Necropolis, NecropolisStats};
-pub use tombstone::{Tombstone, VesselState};
+impl Necropolis {
+    pub fn new() -> Self { Self { artifacts: Vec::new(), catalog: Vec::new(), next_id: 1, tick: 0 } }
+    pub fn register(&mut self, name: &str, kind: ArtKind) -> u32 {
+        let id = self.next_id; self.next_id += 1;
+        self.artifacts.push(Artifact { id, name: name.to_string(), kind, born: self.tick, died: 0, usefulness: 0.5, harvested: false }); id
+    }
+    pub fn kill(&mut self, id: u32) -> Option<Artifact> {
+        if let Some(a) = self.artifacts.iter_mut().find(|a| a.id == id) { a.died = self.tick; }
+        let pos = self.artifacts.iter().position(|a| a.id == id);
+        pos.map(|i| self.artifacts.remove(i))
+    }
+    pub fn harvest(&mut self, id: u32) -> bool {
+        if let Some(a) = self.artifacts.iter_mut().find(|a| a.id == id && a.usefulness > 0.3) {
+            a.harvested = true; let art = a.clone(); self.catalog.push(art); true
+        } else { false }
+    }
+    pub fn catalog_count(&self) -> usize { self.catalog.len() }
+    pub fn active_count(&self) -> usize { self.artifacts.iter().filter(|a| a.died == 0).count() }
+    pub fn find(&self, id: u32) -> Option<&Artifact> { self.artifacts.iter().find(|a| a.id == id).or_else(|| self.catalog.iter().find(|a| a.id == id)) }
+    pub fn by_kind(&self, kind: ArtKind) -> Vec<&Artifact> { self.artifacts.iter().filter(|a| a.kind == kind).collect() }
+    pub fn tick_inc(&mut self) { self.tick += 1; }
+    pub fn resurrect(&mut self, id: u32) -> Option<u32> {
+        let pos = self.catalog.iter().position(|a| a.id == id)?; let mut art = self.catalog.remove(pos);
+        let new_id = self.next_id; self.next_id += 1; art.id = new_id; art.born = self.tick; art.died = 0; art.harvested = false;
+        self.artifacts.push(art); Some(new_id)
+    }
+    pub fn usefulness_of(&self, id: u32) -> f64 { self.find(id).map(|a| a.usefulness).unwrap_or(0.0) }
+    pub fn rate(&mut self, id: u32, score: f64) { if let Some(a) = self.artifacts.iter_mut().find(|a| a.id == id) { a.usefulness = score.clamp(0.0, 1.0); } }
+    pub fn prune(&mut self, max_age: u32) -> Vec<Artifact> {
+        let old: Vec<Artifact> = self.artifacts.iter().filter(|a| a.died > 0 && self.tick - a.died > max_age && a.usefulness < 0.3).cloned().collect();
+        self.artifacts.retain(|a| !(a.died > 0 && self.tick - a.died > max_age && a.usefulness < 0.3)); old
+    }
+    pub fn oldest(&self) -> Option<&Artifact> { self.artifacts.iter().filter(|a| a.died == 0).min_by_key(|a| a.born) }
+    pub fn stats(&self) -> (usize, usize, usize) { (self.active_count(), self.catalog_count(), self.artifacts.iter().filter(|a| a.harvested).count()) }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // 1. tombstone new defaults
-    #[test]
-    fn tombstone_new_defaults() {
-        let t = Tombstone::new(1, "TestVessel");
-        assert_eq!(t.vessel_id, 1);
-        assert_eq!(t.name, "TestVessel");
-        assert_eq!(t.state, VesselState::Alive);
-        assert!(t.cause.is_empty());
-        assert!(t.lesson.is_empty());
-        assert_eq!(t.commits_made, 0);
-        assert_eq!(t.peak_trust, 0.0);
-    }
-
-    // 2. tombstone mark_dead
-    #[test]
-    fn tombstone_mark_dead() {
-        let mut t = Tombstone::new(2, "Vessel2");
-        t.birth_time = 100;
-        t.mark_dead(200);
-        assert_eq!(t.state, VesselState::Dead);
-        assert_eq!(t.death_time, 200);
-        assert_eq!(t.cycles_lived, 100);
-        assert!((t.lifetime_days() - 100.0 / 86400.0).abs() < f64::EPSILON);
-    }
-
-    // 3. graveyard bury and find
-    #[test]
-    fn graveyard_bury_and_find() {
-        let mut gy = Graveyard::new();
-        let t = Tombstone::new(10, "Vessel10");
-        let idx = gy.bury(t).unwrap();
-        assert_eq!(idx, 0);
-        assert!(gy.find(10).is_some());
-        assert!(gy.find(99).is_none());
-    }
-
-    // 4. graveyard find_name
-    #[test]
-    fn graveyard_find_name() {
-        let mut gy = Graveyard::new();
-        gy.bury(Tombstone::new(1, "Alpha")).unwrap();
-        gy.bury(Tombstone::new(2, "Beta")).unwrap();
-        assert!(gy.find_name("Alpha").is_some());
-        assert!(gy.find_name("Gamma").is_none());
-    }
-
-    // 5. graveyard counts
-    #[test]
-    fn graveyard_counts() {
-        let mut gy = Graveyard::new();
-        let mut t1 = Tombstone::new(1, "A");
-        t1.state = VesselState::Dead;
-        let mut t2 = Tombstone::new(2, "B");
-        t2.state = VesselState::Memorialized;
-        let mut t3 = Tombstone::new(3, "C");
-        t3.state = VesselState::Harvested;
-        gy.bury(t1).unwrap();
-        gy.bury(t2).unwrap();
-        gy.bury(t3).unwrap();
-        assert_eq!(gy.count_dead(), 1);
-        assert_eq!(gy.count_memorialized(), 1);
-        assert_eq!(gy.count_harvested(), 1);
-    }
-
-    // 6. graveyard recent_deaths
-    #[test]
-    fn graveyard_recent_deaths() {
-        let mut gy = Graveyard::new();
-        let mut t1 = Tombstone::new(1, "A");
-        t1.death_time = 100;
-        let mut t2 = Tombstone::new(2, "B");
-        t2.death_time = 200;
-        gy.bury(t1).unwrap();
-        gy.bury(t2).unwrap();
-        let recent = gy.recent_deaths(1);
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].vessel_id, 2);
-    }
-
-    // 7. graveyard lessons
-    #[test]
-    fn graveyard_lessons() {
-        let mut gy = Graveyard::new();
-        let mut t = Tombstone::new(1, "A");
-        t.state = VesselState::Dead;
-        t.lesson = "always check types".to_string();
-        gy.bury(t).unwrap();
-        let lessons = gy.lessons();
-        assert_eq!(lessons.len(), 1);
-        assert_eq!(lessons[0], "always check types");
-    }
-
-    // 8. graveyard vessels_by_trust
-    #[test]
-    fn graveyard_vessels_by_trust() {
-        let mut gy = Graveyard::new();
-        let mut t1 = Tombstone::new(1, "A");
-        t1.peak_trust = 0.5;
-        let mut t2 = Tombstone::new(2, "B");
-        t2.peak_trust = 0.9;
-        gy.bury(t1).unwrap();
-        gy.bury(t2).unwrap();
-        let sorted = gy.vessels_by_trust();
-        assert_eq!(sorted[0].vessel_id, 2);
-        assert_eq!(sorted[1].vessel_id, 1);
-    }
-
-    // 9. afterlife store and find
-    #[test]
-    fn afterlife_store_and_find() {
-        let mut al = Afterlife::new();
-        al.store("key1", "value1", 1).unwrap();
-        assert!(al.find("key1").is_some());
-        assert_eq!(al.find("key1").unwrap().value, "value1");
-        assert!(al.find("missing").is_none());
-    }
-
-    // 10. afterlife search prefix
-    #[test]
-    fn afterlife_search_prefix() {
-        let mut al = Afterlife::new();
-        al.store("rust:tip1", "use iterators", 1).unwrap();
-        al.store("rust:tip2", "clippy is good", 1).unwrap();
-        al.store("go:tip1", "handle errors", 2).unwrap();
-        let results = al.search("rust:", 10);
-        assert_eq!(results.len(), 2);
-    }
-
-    // 11. afterlife reuse increment
-    #[test]
-    fn afterlife_reuse_increment() {
-        let mut al = Afterlife::new();
-        al.store("key1", "val1", 1).unwrap();
-        al.increment_reuse("key1");
-        al.increment_reuse("key1");
-        assert_eq!(al.find("key1").unwrap().reused_count, 2);
-    }
-
-    // 12. afterlife most_reused
-    #[test]
-    fn afterlife_most_reused() {
-        let mut al = Afterlife::new();
-        al.store("a", "1", 1).unwrap();
-        al.store("b", "2", 1).unwrap();
-        al.increment_reuse("b");
-        al.increment_reuse("b");
-        al.increment_reuse("b");
-        let top = al.most_reused(1);
-        assert_eq!(top[0].key, "b");
-    }
-
-    // 13. afterlife harvest from tombstone
-    #[test]
-    fn afterlife_harvest_from_tombstone() {
-        let mut al = Afterlife::new();
-        let mut t = Tombstone::new(5, "Harvested");
-        t.lesson = "don't panic".to_string();
-        al.harvest(&t);
-        assert!(al.find("v:5:lesson").is_some());
-        assert_eq!(al.find("v:5:lesson").unwrap().value, "don't panic");
-    }
-
-    // 14. memorial record and counts
-    #[test]
-    fn memorial_record_and_counts() {
-        let mut ml = MemorialLog::new();
-        ml.record(1, 0, 2);
-        ml.record(1, 0, 1);
-        ml.record(2, 0, 1);
-        assert_eq!(ml.visits_to(0), 3);
-        assert_eq!(ml.visits_by(1), 2);
-        let top = ml.most_visited(1);
-        assert_eq!(top[0], (0, 3));
-    }
-
-    // 15. necropolis bury auto-harvests
-    #[test]
-    fn necropolis_bury_auto_harvests() {
-        let mut nec = Necropolis::new();
-        let mut t = Tombstone::new(1, "Auto");
-        t.mark_dead(100);
-        t.set_lesson("automated wisdom");
-        nec.bury(t).unwrap();
-        assert!(nec.afterlife.find("v:1:lesson").is_some());
-    }
-
-    // 16. necropolis visit
-    #[test]
-    fn necropolis_visit() {
-        let mut nec = Necropolis::new();
-        let mut t = Tombstone::new(1, "Visited");
-        t.mark_dead(50);
-        nec.bury(t).unwrap();
-        assert!(nec.visit(10, 1, 3));
-        assert!(!nec.visit(10, 99, 1)); // non-existent
-    }
-
-    // 17. necropolis statistics
-    #[test]
-    fn necropolis_statistics() {
-        let mut nec = Necropolis::new();
-        let mut t = Tombstone::new(1, "Stats");
-        t.mark_dead(100);
-        t.set_lesson("stats lesson");
-        nec.bury(t).unwrap();
-        nec.visit(5, 1, 1);
-        let stats = nec.statistics();
-        assert_eq!(stats.total_buried, 1);
-        assert_eq!(stats.total_knowledge, 1);
-        assert_eq!(stats.total_memorial_visits, 1);
-    }
-
-    // 18. graveyard full error
-    #[test]
-    fn graveyard_full_error() {
-        let mut gy = Graveyard::new();
-        for i in 0..64 {
-            gy.bury(Tombstone::new(i as u16, &format!("v{}", i))).unwrap();
-        }
-        let result = gy.bury(Tombstone::new(99, "overflow"));
-        assert!(result.is_err());
-    }
+    #[test] fn test_new() { let n = Necropolis::new(); assert_eq!(n.active_count(), 0); }
+    #[test] fn test_register() { let mut n = Necropolis::new(); let id = n.register("foo", ArtKind::Function); assert!(id > 0); assert_eq!(n.active_count(), 1); }
+    #[test] fn test_kill() { let mut n = Necropolis::new(); let id = n.register("foo", ArtKind::Module); n.kill(id); assert_eq!(n.active_count(), 0); }
+    #[test] fn test_harvest() { let mut n = Necropolis::new(); let id = n.register("foo", ArtKind::Function); n.rate(id, 0.8); n.kill(id); assert!(n.harvest(id)); assert_eq!(n.catalog_count(), 1); }
+    #[test] fn test_harvest_low_usefulness() { let mut n = Necropolis::new(); let id = n.register("foo", ArtKind::Data); n.rate(id, 0.1); n.kill(id); assert!(!n.harvest(id)); }
+    #[test] fn test_resurrect() { let mut n = Necropolis::new(); let id = n.register("foo", ArtKind::Skill); n.rate(id, 0.8); n.kill(id); n.harvest(id); let new_id = n.resurrect(id); assert!(new_id.is_some()); assert_eq!(n.active_count(), 1); }
+    #[test] fn test_by_kind() { let mut n = Necropolis::new(); n.register("a", ArtKind::Function); n.register("b", ArtKind::Module); assert_eq!(n.by_kind(ArtKind::Function).len(), 1); }
+    #[test] fn test_prune() { let mut n = Necropolis::new(); let id = n.register("x", ArtKind::Data); n.rate(id, 0.1); n.kill(id); for _ in 0..20 { n.tick_inc(); } let p = n.prune(10); assert_eq!(p.len(), 1); }
+    #[test] fn test_rate() { let mut n = Necropolis::new(); let id = n.register("x", ArtKind::Function); n.rate(id, 0.9); assert!((n.usefulness_of(id) - 0.9).abs() < 1e-6); }
+    #[test] fn test_stats() { let mut n = Necropolis::new(); let id = n.register("x", ArtKind::Test); n.rate(id, 0.8); n.kill(id); n.harvest(id); let s = n.stats(); assert_eq!(s.1, 1); }
+    #[test] fn test_oldest() { let mut n = Necropolis::new(); n.tick_inc(); let id1 = n.register("old", ArtKind::Function); n.tick_inc(); n.register("new", ArtKind::Function); assert_eq!(n.oldest().unwrap().id, id1); }
+    #[test] fn test_find_catalog() { let mut n = Necropolis::new(); let id = n.register("x", ArtKind::Function); n.rate(id, 0.8); n.kill(id); n.harvest(id); assert!(n.find(id).is_some()); }
 }
