@@ -2,3 +2,7 @@
 name = "flux-necropolis"
 version = "0.1.0"
 edition = "2021"
+description = "Code lifecycle — death, harvest, catalog — the graveyard where good ideas become lessons"
+
+[dependencies]
+rand = "0.8"
